@@ -1,0 +1,7 @@
+# Benchmark/probe harness dependencies (client-side).
+# The serving stack (1Cat-vLLM 1.2.2, torch 2.10+cu128) is installed
+# separately on the target box by scripts/bootstrap-sm70.sh; see the
+# Quick start section of README.md.
+torch>=2.10
+safetensors>=0.4
+numpy>=1.26

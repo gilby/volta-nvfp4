@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use v100-skinny, please cite it as below."
+title: "v100-skinny: native mixed NVFP4/FP8 LLM inference on NVIDIA Volta"
+abstract: >-
+  Executes Qwen3.8-27B's published mixed NVFP4/FP8 weight representation
+  unchanged on SM70 (Tesla V100), via hand-written W4A16 (QPN2) and W8A16
+  (QPN8) kernels built around Volta's mma.sync.m8n8k4 instruction. No
+  FP8-to-FP4 requantization and no persistent FP16 weight copy.
+type: software
+authors:
+  - family-names: Vertzyas
+    given-names: Dennis
+version: "1.1"
+date-released: "2026-08-19"
+license:
+  - MIT
+  - Apache-2.0
+license-url: "https://github.com/dnv2003/v100-skinny/blob/main/LICENSE"
+repository-code: "https://github.com/dnv2003/v100-skinny"
+keywords:
+  - inference
+  - quantization
+  - NVFP4
+  - FP8
+  - Volta
+  - SM70
+  - speculative-decoding
+  - vLLM

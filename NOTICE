@@ -1,0 +1,48 @@
+v100-skinny
+Copyright (c) 2026 v100-skinny contributors
+
+This product is built on, and includes modified software from, two upstream
+projects. The derivation chain is:
+
+    vLLM  ->  1Cat-vLLM (SM70 fork)  ->  v100-skinny
+
+1Cat-vLLM
+  https://github.com/1CatAI/1Cat-vLLM   (1cat-vllm 1.2.2)
+  Author: 1Cat AI, vLLM Team
+  Licensed under the Apache License, Version 2.0.
+
+  1Cat AI's SM70/Volta fork of vLLM is the engine this project extends. The
+  files under fork_patches/ are taken FROM that fork and carry our edits on
+  top, so 1Cat AI's modifications are present in every one of them. The
+  Volta backport of the serving engine is their work, not ours.
+
+  That distribution also ships `flash_attn_v100` -- a native FlashAttention
+  for SM70 (15 MB of compiled sm_70 device code) with paged KV, split-KV
+  prefill, XQA and WMMA decode paths and quantized-KV decode. Upstream
+  FlashAttention requires Ampere or newer and offers Turing only a separate
+  third-party partial port; Volta is a generation below that. Every attention
+  number in this repository depends on that component, and none of it is our
+  work.
+
+vLLM
+  https://github.com/vllm-project/vllm
+  Copyright contributors to the vLLM project
+  Licensed under the Apache License, Version 2.0.
+
+  1Cat-vLLM is itself a derivative of vLLM, and the files under
+  fork_patches/ retain vLLM's original SPDX headers and copyright.
+
+Accordingly, everything under fork_patches/ remains under the Apache License,
+Version 2.0 (see LICENSE-APACHE-2.0). Each file states its modifications in
+its header, as Apache-2.0 section 4(b) requires.
+
+1Cat-vLLM additionally vendors sources from LMDeploy / TurboMind
+(https://github.com/InternLM/lmdeploy), Copyright OpenMMLab, licensed under
+the Apache License, Version 2.0. This repository does not redistribute those
+sources; it references them only in documentation. Any distribution that does
+include them must credit LMDeploy here.
+
+Everything else in this repository -- kernels/, benchmarks/, scripts/, docs/
+and results/ -- is original work under the MIT License, in LICENSE. That is
+the NVFP4 and FP8 GEMM kernels for SM70 and the harnesses around them; it is
+not an inference engine.

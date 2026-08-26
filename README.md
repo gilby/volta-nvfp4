@@ -28,30 +28,84 @@ path on the same GPUs (Laguna-S-2.1, TP4, 3 runs):
 
 And **99.4 tok/s single-stream for a 35B MoE on one 2017-era GPU** (Qwen3.6-35B-A3B).
 
-## ⚠️ Read this before deploying: the `N ≤ 2` rule
+## Concurrency: the `N ≤ 2` rule is FIXED (2026-08-26)
 
-**Throughput peaks at N=2 concurrent streams and collapses at N=3** — a third simultaneous
-user costs 71–86% of aggregate throughput.
+**Earlier releases of this repo told you to cap at N=2.** That limit was never a property
+of the hardware or the kernels — it was a cudagraph capture bug, and it is now fixed. On
+the same two V100s, same NVFP4 weights, same QPN2-MoE kernels:
 
-This is **not** the MoE kernel. With the kernel disabled (`MOEFLAG=0`, stock Marlin) the
-collapse is identical, and per-stream throughput at N=3 lands within 4% of the kernel-on arm
-(11.5 vs 11.1 tok/s). It is a property of the shared serving path on this SM70 stack, and it
-is **TP-independent** — TP1, TP2 and TP4 all break at exactly N=3, despite TP4 bringing 4× the
-weight-streaming bandwidth and 6.1× the KV pool.
+| N | before (capture `[1,2]`) | after (capture ladder) | speedup |
+|---|---:|---:|---:|
+| 1 | 95.4 | 95.1 | 1.00x |
+| 2 | 160.8 | 172.3 | 1.07x |
+| **3** | **39.8** | **233.1** | **5.85x** |
+| **4** | **39.9** | **297.7** | **7.46x** |
+| 8 | 104.6 | 509.4 | 4.87x |
+| 16 | 205.7 | **786.0** | 3.82x |
 
-**Treat this as a single-user / small-team stack, not a shared serving endpoint.**
+*(aggregate tok/s, Qwen3.6-35B-A3B-NVFP4, TP2, MML 16384, MNS 16, temp 0)*
 
-Two ways around it, both measured:
+Aggregate now rises monotonically through N=16 and per-stream tapers gracefully
+(95.1 -> 49.1 tok/s across a 16x concurrency increase) instead of collapsing.
 
-- **Split the array.** Two engines on *disjoint* GPUs at N=2 each interfere by <2%. Three TP2
-  instances across six V100s reached **187.1 tok/s** vs 77.3 for one TP4 on four cards.
-- **NVIDIA MPS, if engines must share cards.** Two engines at N=2 each under MPS: **259.7 tok/s
-  at 4 total streams** vs 35.7 for one engine. Without MPS the same config collapses to 38.6.
-  Start `nvidia-cuda-mps-control -d` **before** the serving processes — it cannot attach to
-  running CUDA contexts. Sharing still costs ~23% per instance, so prefer splitting.
+### What was actually wrong
 
-⚠️ This breakpoint is invisible to a standard N=1/2/4/8 sweep, which steps straight over N=3.
-It was only found by measuring N=3 explicitly.
+1Cat-vLLM pins the SM70 cudagraph capture list to `[1, 2]`
+(`vllm/config/vllm.py`, the `VLLM_SM70_FLASH_V100_0DOT3_COMPILE_GRAPH` branch). The
+dispatcher (`vllm/v1/cudagraph_dispatcher.py`) then returns `CUDAGraphMode.NONE` for any
+step wider than the largest captured size:
+
+```python
+if ... or num_tokens > max_size:      # 3 > 2
+    return CUDAGraphMode.NONE, ...    # fully eager, no piecewise fallback
+```
+
+A decode step is `N*(K+1)` tokens wide, so at K=0 **every step with 3+ running requests
+ran fully eager** — thousands of tiny kernel launches, CPU-bound. Three independent
+confirmations: forcing `--enforce-eager` at N=2 reproduces the collapse (9.2 tok/s per
+stream) at a concurrency that otherwise runs fine; power draw sits at 48-55 W when eager
+versus 64-83 W with graphs (the GPU was starved, not saturated); and the route census is
+identical in both arms, so the kernels were never the variable.
+
+This also corrects an earlier claim in this README: the collapse was called
+"a property of the shared serving path" and "TP-independent". TP-independent was right,
+but for the wrong reason — every TP hit it because the capture list is TP-independent.
+
+### What you need to do
+
+Nothing, if you use `serve.sh` — it now builds a capture ladder from `MNS` and `K`
+automatically and prints it at launch. To override or opt out:
+
+```bash
+CAPTURE=1,2,4,8,16 MNS=16 ./serve.sh    # explicit ladder
+CAPTURE=none       MNS=16 ./serve.sh    # stock behaviour (reproduces the cliff)
+```
+
+Launching vLLM directly, pass the ladder yourself — sizes must cover `N*(K+1)` for every
+N the scheduler can schedule:
+
+```bash
+--compilation-config '{"cudagraph_capture_sizes":[1,2,3,4,6,8,12,16]}'   # K=0, MNS=16
+```
+
+⚠️ `VLLM_SM70_DENSE_CUDAGRAPH_CAPTURE=1` looks like the fix and is a **no-op** — its
+branch is unreachable once the `[1,2]` assignment has run.
+
+⚠️ Capture costs startup time: PIECEWISE capture is ~35 s per size against 1.6-2.5 s for
+FULL decode capture. `VLLM_SM70_FLASH_V100_0DOT3_DECODE_ONLY_CAPTURE=1` skips the
+expensive half if boot time matters more than mixed prefill-decode graphs.
+
+### Multi-instance layouts (still valid, now less necessary)
+
+- **Split the array.** Two engines on *disjoint* GPUs at N=2 each interfere by <2%. Three
+  TP2 instances across six V100s reached **187.1 tok/s** vs 77.3 for one TP4 on four cards.
+- **NVIDIA MPS, if engines must share cards.** Two engines at N=2 each under MPS:
+  **259.7 tok/s at 4 total streams** vs 35.7 for one engine; without MPS the same config
+  collapses to 38.6. Start `nvidia-cuda-mps-control -d` **before** the serving processes —
+  it cannot attach to running CUDA contexts. Sharing costs ~23% per instance.
+
+Those numbers were measured under the old capture list, so they understate what a single
+engine can now do. A single TP2 engine at N=16 reaches 786 tok/s.
 
 ---
 

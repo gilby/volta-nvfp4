@@ -10,7 +10,10 @@
 #   GPU       CUDA_VISIBLE_DEVICES, e.g. 4 or 0,1 (default 0)
 #   TP        tensor-parallel size (default 1; must match the GPU count)
 #   MML       max-model-len (default 16384)
-#   MNS       max-num-seqs (default 1 — see the N<=2 rule in README.md)
+#   MNS       max-num-seqs (default 1). Concurrency is NOT capped at 2 any more —
+#             the capture ladder below is what made N>2 usable; see README.md
+#   CAPTURE   cudagraph capture sizes, csv. Default: derived from MNS and K.
+#             "none" omits the flag (stock behaviour = the N>2 cliff)
 #   K         MTP speculative depth, 0 = off (default 0)
 #   PORT      default 8033
 #   GMU       gpu-memory-utilization (default 0.92)
@@ -28,11 +31,31 @@ K=${K:-0}; PORT=${PORT:-8033}; MOEFLAG=${MOEFLAG:-1}; LMHEAD=${LMHEAD:-1}
 LOG=${LOG:-$MOE/serve.log}
 rm -f "$LOG"
 
+MNS=${MNS:-1}
+
+# --- cudagraph capture ladder (THE concurrency lever; see README) -------------
+# A decode step is N*(K+1) tokens wide for N running requests. vLLM dispatches
+# CUDAGraphMode.NONE - fully eager - for any width above the largest captured
+# size, and eager decode on SM70 is CPU-launch-bound: measured 5.9x slower at
+# N=3 and 7.5x at N=4. So capture EVERY width the scheduler can produce, not a
+# token pair. CAPTURE=<csv> overrides; CAPTURE=none omits the flag entirely.
+build_ladder() {                      # $1=MNS  $2=K
+  local mns=$1 k=$2 w=$(( $2 + 1 )) n step out=""
+  step=1; [ "$mns" -gt 16 ] && step=$(( (mns + 15) / 16 ))   # <=16 entries
+  for (( n=1; n<=mns; n+=step )); do out="${out}${out:+,}$(( n * w ))"; done
+  [ $(( (mns - 1) % step )) -ne 0 ] && out="${out},$(( mns * w ))"
+  echo "$out"
+}
+if [ "${CAPTURE:-}" = "none" ]; then
+  CAP=()
+else
+  LADDER=${CAPTURE:-$(build_ladder "$MNS" "$K")}
+  CAP=(--compilation-config "{\"cudagraph_capture_sizes\":[$LADDER]}")
+fi
+
 SPEC=()
 if [ "$K" -gt 0 ]; then
-  K1=$((K+1)); K2=$((K1*2))
-  SPEC=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"greedy\",\"use_local_argmax_reduction\":true}"
-        --compilation-config "{\"cudagraph_capture_sizes\":[$K1,$K2]}")
+  SPEC=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$K,\"draft_sample_method\":\"greedy\",\"use_local_argmax_reduction\":true}")
 fi
 
 PATH=$REPO/.venv-sm70/bin:$PATH \
@@ -62,11 +85,11 @@ setsid $PY -m vllm.entrypoints.openai.api_server \
   --tensor-parallel-size "${TP:-1}" \
   --gpu-memory-utilization "${GMU:-0.92}" \
   --max-model-len "${MML:-16384}" \
-  --max-num-seqs "${MNS:-1}" \
+  --max-num-seqs "$MNS" \
   --max-num-batched-tokens 4096 \
   ${KVDTYPE:+--kv-cache-dtype "$KVDTYPE"} \
   --limit-mm-per-prompt '{"image":0,"video":0}' \
-  "${SPEC[@]}" \
+  "${SPEC[@]}" "${CAP[@]}" \
   --host 127.0.0.1 --port "$PORT" > "$LOG" 2>&1 < /dev/null &
 echo $! > "$MOE/serve.pid"
-echo "launched pid $(cat "$MOE/serve.pid") TP=${TP:-1} port=$PORT K=$K MOE=$MOEFLAG LMHEAD=$LMHEAD"
+echo "launched pid $(cat "$MOE/serve.pid") TP=${TP:-1} port=$PORT K=$K MNS=$MNS MOE=$MOEFLAG LMHEAD=$LMHEAD capture=[${LADDER:-none}]"

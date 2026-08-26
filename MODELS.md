@@ -13,9 +13,15 @@ hardware maximum**; a 250 W A/B changed nothing outside noise. The figures below
 Sweeps are aggregate tok/s at N concurrent streams, greedy (`temperature 0`)
 unless noted. Launch everything with `./serve.sh`.
 
-> **The `N ≤ 2` rule applies to every QPN2-MoE model below.** Throughput peaks at
-> N=2 and collapses at N=3. It is a property of the serving path, not of any one
-> model or of the kernel. Details in README.md.
+> **The `N ≤ 2` rule is FIXED (2026-08-26)** and no longer applies to any model below.
+> The N=3 collapse was a cudagraph capture bug — 1Cat-vLLM pins the SM70 capture list
+> to `[1,2]`, so every decode step with 3+ running requests dispatched
+> `CUDAGraphMode.NONE` and ran fully eager. `serve.sh` now builds a capture ladder from
+> `MNS` and `K` automatically: N=4 went 39.9 -> **297.7** tok/s (7.46x), N=16 205.7 ->
+> **786.0**. See README -> Concurrency for the mechanism and the override knobs.
+>
+> ⚠️ **Every concurrency figure in the per-model sweeps below was measured before the
+> fix** and understates N>=3 throughput. Single-stream numbers are unaffected.
 
 ---
 
@@ -62,7 +68,9 @@ GPU=0 TP=1 MML=32768 MNS=16 K=0 ./serve.sh
 
 **99.4 tok/s single-stream for a 35B MoE on one 2017-era GPU.**
 
-TP scaling (MML 32768, MNS 16) — every TP peaks at N=2 and dies at N=3:
+TP scaling (MML 32768, MNS 16) — **measured before the capture-ladder fix**, so every
+TP appears to die at N=3. That was the `[1,2]` capture pin, which is TP-independent;
+re-measure before citing these:
 
 | N | TP1 | TP2 | TP4 |
 |---|---|---|---|
@@ -73,7 +81,11 @@ TP scaling (MML 32768, MNS 16) — every TP peaks at N=2 and dies at N=3:
 
 ### Do not
 
-- **Do not run above N=2.** N=3 costs 71–86% of throughput.
+- ~~Do not run above N=2~~ **FIXED 2026-08-26.** The N=3 collapse was a cudagraph
+  capture bug (`[1,2]` pin), not the serving path. With the capture ladder that
+  `serve.sh` now builds automatically: N=3 **233.1** (was 39.8, 5.85x), N=4 **297.7**
+  (was 39.9, 7.46x), N=16 **786.0** (was 205.7). Aggregate rises monotonically to
+  N=16; per-stream tapers 95.1 -> 49.1. See README -> Concurrency.
 - **Do not assume fewer TP ranks win.** On this model throughput rises monotonically
   with TP at N=1 — TP4 is fastest at N=1, N=2 *and* N=4. The "allreduce dominates for
   MoE" heuristic does not hold here.
@@ -158,7 +170,9 @@ concurrency, not a reasoning failure.
 
 - **Do not use the DRY sampler.** It *causes* rep-1.000 collapse on code by fragmenting
   repetitive syntax. Use `frequency_penalty 0.3` instead — it is also worth +17% at N=8.
-- **Do not run above N=2** for latency-sensitive work; use TP2 if you need context depth.
+- ~~Do not run above N=2~~ **superseded 2026-08-26** by the capture-ladder fix (see
+  README -> Concurrency). Concurrency now scales; TP2 remains the lever for context depth.
+  The per-model sweeps below predate the fix and understate concurrent throughput.
 - **Do not skip the reasoning cap.** The family has a documented runaway-reasoning trait.
 
 ---

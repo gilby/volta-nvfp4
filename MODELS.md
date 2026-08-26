@@ -5,9 +5,10 @@ mistakes to avoid. All numbers measured on **6× Tesla V100-PCIE-32GB** (no NVLi
 all-PHB, PCIe Gen3 ×16) — see README.md for why that makes multi-GPU figures a
 lower bound.
 
-⚠️ **These cards are power-capped to 200 W against a 250 W default** (~1230 MHz sustained
-vs a 1380 MHz max). Every tok/s figure below is therefore measured at 80% of rated TDP and
-is **conservative** — see README.md → Test hardware.
+⚠️ **These cards are power-capped to 200 W against a 250 W default — but the cap is not
+binding.** Measured under load: peak draw **83 W of 200 W** and SM clock at the **1380 MHz
+hardware maximum**; a 250 W A/B changed nothing outside noise. The figures below are therefore
+*not* understated for power reasons — see README.md → Test hardware.
 
 Sweeps are aggregate tok/s at N concurrent streams, greedy (`temperature 0`)
 unless noted. Launch everything with `./serve.sh`.

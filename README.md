@@ -85,13 +85,27 @@ GPU=4 TP=1 MML=131072 MNS=8 ./serve.sh
 crosses the host bridge; PCIe Gen3 ×16 (~13 GB/s per card); 377 GiB system RAM.
 
 ⚠️ **Every number in this repository was measured with the cards power-capped to 200 W, against
-a 250 W default** (`nvidia-smi -pl 200`; `power.max_limit` is 250 W). That is 80% of rated TDP,
-and it holds the SM clock at ~1230 MHz against a 1380 MHz maximum. Treat all published figures
-as **conservative** — a box running stock 250 W, and certainly a 300 W SXM2 part, should beat
-them. If you are comparing your own results against this repo, check your power limit first:
+a 250 W default** (`nvidia-smi -pl 200`; `power.max_limit` is 250 W).
+
+**Measured 2026-08-26: that cap is not binding for these workloads, and lifting it does not help.**
+A/B on Qwen3.6-35B-A3B-NVFP4 (TP2, temp 0), sampling power and clocks once a second during
+generation:
+
+| N | 200 W aggTPS | 250 W aggTPS | peak draw / GPU | SM clock |
+|---|---:|---:|---:|---:|
+| 1 | 95.8 | 96.3 | 78–80 W | 1380 MHz |
+| 2 | 161.3 | 174.6 | 80–83 W | 1380 MHz |
+| 3 | 40.6 | 39.8 | 56 W | 1380 MHz |
+| 8 | 106.5 | 103.8 | 58 W | 1380 MHz |
+
+Peak draw never exceeded **83 W of the 200 W budget** and the SM clock sat at **1380 MHz, the
+hardware maximum**, in both arms — so there is no headroom the cap was withholding. Raising to
+250 W changed nothing outside noise (+0.6% at N=1, −2% at N≥3). If you are comparing your own
+results against this repo, **a stock 250 W box should not expect a power-related advantage**;
+check what your cards actually draw before assuming otherwise:
 
 ```bash
-nvidia-smi --query-gpu=index,power.limit,power.default_limit,clocks.sm --format=csv
+nvidia-smi --query-gpu=index,power.draw,power.limit,clocks.sm --format=csv   # under load
 ```
 
 TP all-reduce is also materially more expensive here than on an SXM2/NVLink box, so multi-GPU

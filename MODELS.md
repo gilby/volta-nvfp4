@@ -14,6 +14,32 @@ unless noted. Launch everything with `./serve.sh`.
 
 ---
 
+## Why an A3B MoE gains far less than a dense model
+
+The QPN kernels win by reading 4-bit weights instead of dequantizing to 16-bit. That only
+helps when decode is **bandwidth-bound**, and a sparse MoE mostly is not:
+
+| | weights read per token | ceiling @ 900 GB/s | measured @ N=1 | % of ceiling |
+|---|---:|---:|---:|---:|
+| dense 27B NVFP4 | 15.2 GB | ~59 tok/s | near ceiling | bandwidth-bound |
+| **35B-A3B NVFP4** | **1.29 GB** | **~698 tok/s** | ~100 | **~14%** |
+
+The A3B moves **11.8x less** weight data per token, so there is little bandwidth left to save.
+What actually costs time is **960 tiny GEMMs per token** — 40 layers x 8 routed experts x 3
+matrices, each only 2048x512 — which cannot fill an SM70 at batch 1. The workload is
+launch-latency bound.
+
+Two consequences, both measured and both counter to the usual MoE folklore:
+
+- **More TP helps at N=1** (TP4 > TP2 > TP1) — extra SMs run those small GEMMs concurrently,
+  and the allreduce is cheap at hidden_size 2048.
+- **Batching helps enormously** — N=2 reaches 148.2 aggregate, because each expert GEMM
+  finally has more than one row of work.
+
+Expect a dense model's 2-3x from these kernels; expect roughly 20-30% on an A3B.
+
+---
+
 ## Qwen3.6-35B-A3B — NVFP4, QPN2-MoE
 
 [`nvidia/Qwen3.6-35B-A3B-NVFP4`](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4)
@@ -48,6 +74,22 @@ TP scaling (MML 32768, MNS 16) — every TP peaks at N=2 and dies at N=3:
   MoE" heuristic does not hold here.
 - **Do not conclude the kernel causes the cliff.** With `MOEFLAG=0` (stock Marlin) the
   collapse is identical and per-stream throughput at N=3 lands within 4% (11.5 vs 11.1).
+- **Do not enable MTP (`K>0`) on this checkpoint.** It is a large net *loss*, and the
+  draft-acceptance rate will mislead you into keeping it:
+
+  | K | tok/s @ N=1 | draft acceptance |
+  |---|---|---|
+  | **0** | **102.8** | — |
+  | 2 | 37.3 | 92.3% |
+  | 4 | 29.1 | 81.9% |
+
+  92% acceptance and still 64% slower, and it is not a TP artefact — at TP4 the same pattern
+  holds (K=0 **105.0** vs K=2 **41.1**, at 93.7% acceptance). The cause is in the weights: `nvidia/Qwen3.6-35B-A3B-NVFP4`
+  quantizes the body to NVFP4 (`U8` packed + `F8_E4M3` scales) but ships the MTP head as **19 plain
+  BF16 tensors**. Every draft step therefore leaves the QPN2/skinny path for the generic SM70
+  unquantized-MoE kernel (`Using default MoE config. Performance might be sub-optimal`). A draft
+  step reads 129 MB BF16 vs 36 MB if it were NVFP4 — and costs far more wall-time than even that
+  implies, because decode here is latency-bound, not bandwidth-bound.
 
 ---
 

@@ -84,7 +84,17 @@ GPU=4 TP=1 MML=131072 MNS=8 ./serve.sh
 **6× Tesla V100-PCIE-32GB** (not SXM2). **No NVLink** — all-PHB topology, every GPU↔GPU hop
 crosses the host bridge; PCIe Gen3 ×16 (~13 GB/s per card); 377 GiB system RAM.
 
-TP all-reduce is materially more expensive here than on an SXM2/NVLink box, so multi-GPU
+⚠️ **Every number in this repository was measured with the cards power-capped to 200 W, against
+a 250 W default** (`nvidia-smi -pl 200`; `power.max_limit` is 250 W). That is 80% of rated TDP,
+and it holds the SM clock at ~1230 MHz against a 1380 MHz maximum. Treat all published figures
+as **conservative** — a box running stock 250 W, and certainly a 300 W SXM2 part, should beat
+them. If you are comparing your own results against this repo, check your power limit first:
+
+```bash
+nvidia-smi --query-gpu=index,power.limit,power.default_limit,clocks.sm --format=csv
+```
+
+TP all-reduce is also materially more expensive here than on an SXM2/NVLink box, so multi-GPU
 numbers are a **lower bound** for better-connected Volta systems.
 
 ---

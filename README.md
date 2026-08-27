@@ -48,16 +48,17 @@ the same two V100s, same NVFP4 weights, same QPN2-MoE kernels:
 Aggregate now rises monotonically through N=16 and per-stream tapers gracefully
 (95.1 -> 49.1 tok/s across a 16x concurrency increase) instead of collapsing.
 
-### Validated on three models and two TP configurations (2026-08-27)
+### Validated on four models, dense and MoE, two TP configurations (2026-08-27)
 
 The fix is a property of the stack, not of one checkpoint. Two arms per model, differing
 **only** in `cudagraph_capture_sizes`; greedy (temp 0):
 
-| model | size / TP | N=4 stock `[1,2]` | N=4 ladder | speedup |
-|---|---|---:|---:|---:|
-| Qwen3.6-35B-A3B-NVFP4 | 22 GB, TP2 | 39.9 | 297.7 | **7.46x** |
-| Ornith-1.5-35B-A3B-NVFP4 | 22 GB, TP2 | 30.9 | 282.9 | **9.16x** |
-| Laguna-S-2.1-NVFP4 | 92 GB, **TP4** | 30.1 | 79.2 | **2.63x** |
+| model | type | size / TP | N=4 stock `[1,2]` | N=4 ladder | speedup |
+|---|---|---|---:|---:|---:|
+| Qwen3.6-35B-A3B-NVFP4 | MoE | 22 GB, TP2 | 39.9 | 297.7 | **7.46x** |
+| Ornith-1.5-35B-A3B-NVFP4 | MoE | 22 GB, TP2 | 30.9 | 282.9 | **9.16x** |
+| Laguna-S-2.1-NVFP4 | MoE | 92 GB, **TP4** | 30.1 | 79.2 | **2.63x** |
+| **Qwen3.8-27B-NVFP4** | **dense** | 21 GB, TP2 | 55.3 | 151.4 | **2.74x** |
 
 **N=1 and N=2 are the built-in control.** Those widths are captured under *both* arms, so they
 must agree — and they do to within 0.3% on every model (e.g. Ornith 95.66 vs 95.36 at N=1,
@@ -71,6 +72,34 @@ captured graph.
 Magnitude varies with how GEMM-bound the model is (Laguna is ~3x slower per stream, so
 graph-launch overhead is a smaller share of its step time), but **the direction and mechanism are
 identical everywhere**.
+
+The dense case matters most, because `Qwen3.8-27B-NVFP4` is the checkpoint this project was
+built around and its concurrency inversion had a *different* standing explanation: QPN2 kernel
+M-coverage (decode `M = num_seqs x (k+1)`, only `M<=8` reaching the fast band). That band
+spreading is real, but it was **not** the binding constraint — the same ladder recovers 2.5-2.7x
+without touching a kernel. Full stock-vs-ladder curve at K=0, MNS=16:
+
+| N | stock | ladder |
+|---:|---:|---:|
+| 1 | 45.7 | 46.1 |
+| 2 | **85.9** | 83.7 |
+| 4 | 55.3 | **151.4** |
+| 8 | 98.6 | **249.5** |
+
+Stock peaks at N=2 and collapses 36% at N=4; with the ladder, aggregate rises monotonically.
+
+### With speculative decoding on, `[1,2]` is not just slow - the engine will not start
+
+Decode width is `num_seqs x (k+1)`, so with the SM70 MTP defaults (k=4) every width is a multiple
+of **5** - and `[1,2]` contains none:
+
+```
+RuntimeError: No valid cudagraph sizes after rounding to multiple of 5 (num_speculative...)
+```
+
+Same root cause as the silent MoE degradation, but a loud failure instead of a quiet one. If you
+hand-set `cudagraph_capture_sizes` alongside spec decode, the entries must be multiples of `k+1`.
+`serve.sh` derives this for you from `MNS` and `K`.
 
 ### What was actually wrong
 

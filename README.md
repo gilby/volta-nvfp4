@@ -48,6 +48,30 @@ the same two V100s, same NVFP4 weights, same QPN2-MoE kernels:
 Aggregate now rises monotonically through N=16 and per-stream tapers gracefully
 (95.1 -> 49.1 tok/s across a 16x concurrency increase) instead of collapsing.
 
+### Validated on three models and two TP configurations (2026-08-27)
+
+The fix is a property of the stack, not of one checkpoint. Two arms per model, differing
+**only** in `cudagraph_capture_sizes`; greedy (temp 0):
+
+| model | size / TP | N=4 stock `[1,2]` | N=4 ladder | speedup |
+|---|---|---:|---:|---:|
+| Qwen3.6-35B-A3B-NVFP4 | 22 GB, TP2 | 39.9 | 297.7 | **7.46x** |
+| Ornith-1.5-35B-A3B-NVFP4 | 22 GB, TP2 | 30.9 | 282.9 | **9.16x** |
+| Laguna-S-2.1-NVFP4 | 92 GB, **TP4** | 30.1 | 79.2 | **2.63x** |
+
+**N=1 and N=2 are the built-in control.** Those widths are captured under *both* arms, so they
+must agree — and they do to within 0.3% on every model (e.g. Ornith 95.66 vs 95.36 at N=1,
+171.82 vs 171.65 at N=2). Divergence appears only at widths the stock list does not cover, which
+is what the dispatcher explanation predicts and what a confound would not produce.
+
+Power draw corroborates independently: at N=4 the stock arm sits at 53.9-59.2 W mean while the
+ladder arm draws 84.7-88.4 W — the difference between launching kernels eagerly and replaying a
+captured graph.
+
+Magnitude varies with how GEMM-bound the model is (Laguna is ~3x slower per stream, so
+graph-launch overhead is a smaller share of its step time), but **the direction and mechanism are
+identical everywhere**.
+
 ### What was actually wrong
 
 1Cat-vLLM pins the SM70 cudagraph capture list to `[1, 2]`

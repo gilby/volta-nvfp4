@@ -93,3 +93,51 @@ setsid $PY -m vllm.entrypoints.openai.api_server \
   --host 127.0.0.1 --port "$PORT" > "$LOG" 2>&1 < /dev/null &
 echo $! > "$MOE/serve.pid"
 echo "launched pid $(cat "$MOE/serve.pid") TP=${TP:-1} port=$PORT K=$K MNS=$MNS MOE=$MOEFLAG LMHEAD=$LMHEAD capture=[${LADDER:-none}]"
+
+# ---------------------------------------------------------------------------
+# Readiness gate + JIT warm-up.  WARMUP=0 to skip.
+#
+# Without this, serve.sh returns as soon as the process is forked and the FIRST REAL REQUEST
+# pays kernel JIT + CUDA-graph capture. That penalty is large and it lands on a user:
+# measured on this box, an identical model loaded in 350 s cold vs 150 s with a warm page
+# cache, and the mt2 work saw a first-request decode penalty down at ~28 tok/s.
+# It matters most under llama-swap, where a swap-in is triggered BY a user request.
+#
+# NOTE: send ONE blocking request and wait. Do not poll a swap-managed endpoint during a cold
+# start - each probe re-triggers the swap and can kill the in-flight load.
+if [ "${WARMUP:-1}" = "1" ]; then
+  t0=$(date +%s)
+  ready=0
+  for i in $(seq 1 "${WARMUP_TRIES:-240}"); do
+    if curl -sf -m 5 "http://127.0.0.1:$PORT/v1/models" 2>/dev/null | grep -q "$SERVED"; then
+      ready=1; break
+    fi
+    # surface a dead load instead of silently waiting out the timeout
+    if ! kill -0 "$(cat "$MOE/serve.pid")" 2>/dev/null; then
+      echo "warmup: server process died during load - see $LOG"; break
+    fi
+    sleep 5
+  done
+  if [ "$ready" = "1" ]; then
+    echo "warmup: endpoint up after $(( $(date +%s) - t0 ))s; sending one blocking generation to force JIT + graph capture"
+    w0=$(date +%s)
+    body=$(printf '{"model":"%s","messages":[{"role":"user","content":"Write three sentences about heat transfer."}],"max_tokens":192,"temperature":0}' "$SERVED")
+    out=$(curl -sf -m "${WARMUP_TIMEOUT:-900}" "http://127.0.0.1:$PORT/v1/chat/completions" \
+            -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
+    # count reasoning too: a reasoning model can spend a small budget entirely in <think>
+    # and return empty content on a perfectly healthy server.
+    n=$(printf '%s' "$out" | python3 -c 'import sys,json
+try:
+    m=json.load(sys.stdin)["choices"][0]["message"]
+    print(len(((m.get("content") or "")+(m.get("reasoning_content") or "")).strip()))
+except Exception:
+    print(0)' 2>/dev/null)
+    if [ "${n:-0}" -gt 0 ]; then
+      echo "warmup: OK - generated $n chars in $(( $(date +%s) - w0 ))s; kernels compiled, graphs captured"
+    else
+      echo "warmup: FAILED - endpoint answered but produced nothing (see $LOG)"
+    fi
+  else
+    echo "warmup: endpoint never came up within $(( ${WARMUP_TRIES:-240} * 5 ))s"
+  fi
+fi
